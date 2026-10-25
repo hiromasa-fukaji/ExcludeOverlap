@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Difference Ellipses</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --gui-bg: #f1f1f1;
+      --gui-input-bg: rgb(255, 255, 255);
+      --gui-input-bg-hover: #f0f0f0;
+      --gui-input-bg-focus: #e0e0e0;
+      --gui-input-bg-active: #d0d0d0;
+      --gui-input-fg: #242424;
+      --gui-title-fg: #242424;
+      --gui-title-bg: rgb(255, 255, 255);
+      --gui-title-bg-hover: #b6b6b6;
+      --gui-title-bg-focus: #b6b6b6;
+      --gui-title-bg-active: #b6b6b6;
+      --gui-label-fg: #242424;
+      --gui-button-fg: #242424;
+      --gui-button-bg: #dbdbdb;
+      --gui-button-bg-hover: #b6b6b6;
+      --gui-button-bg-focus: #b6b6b6;
+      --gui-button-bg-active: #d5d5d5;
+    }
+
+    html, body { margin: 0; padding: 0; background: #f1f1f1; height: 100%; overflow: hidden; }
+    body { display: grid; grid-template-columns: 280px 1fr; }
+
+    #pane-holder {
+      --tp-base-font-family: 'IBM Plex Mono', 'Hiragino Sans', 'Yu Gothic', monospace;
+      height: 100vh;
+      overflow-y: auto;
+      background: var(--gui-bg);
+      --tp-base-background-color: var(--gui-bg);
+      --tp-input-background-color: var(--gui-input-bg);
+      --tp-input-background-color-hover: var(--gui-input-bg-hover);
+      --tp-input-background-color-focus: var(--gui-input-bg-focus);
+      --tp-input-background-color-active: var(--gui-input-bg-active);
+      --tp-input-foreground-color: var(--gui-input-fg);
+      --tp-container-foreground-color: var(--gui-title-fg);
+      --tp-container-background-color: var(--gui-title-bg);
+      --tp-container-background-color-hover: var(--gui-title-bg-hover);
+      --tp-container-background-color-focus: var(--gui-title-bg-focus);
+      --tp-container-background-color-active: var(--gui-title-bg-active);
+      --tp-label-foreground-color: var(--gui-label-fg);
+      --tp-button-foreground-color: var(--gui-button-fg);
+      --tp-button-background-color: var(--gui-button-bg);
+      --tp-button-background-color-hover: var(--gui-button-bg-hover);
+      --tp-button-background-color-focus: var(--gui-button-bg-focus);
+      --tp-button-background-color-active: var(--gui-button-bg-active);
+      --tp-base-border-radius: 0;
+    }
+    #pane-holder *, #pane-holder *::before, #pane-holder *::after { border-radius: 0 !important; }
+    #pane-holder .tp-rotv { box-shadow: none; }
+    #pane-holder .tp-rotv_b { height: 40px; pointer-events: none; }
+    #pane-holder .tp-rotv_m { display: none; }
+    #pane-holder .tp-fldv_b { pointer-events: none; }
+    #pane-holder .tp-fldv_m { display: none; }
+    #pane-holder .tp-rotv_t { font-size: 13px; line-height: 40px; }
+    #pane-holder .tp-btnv_b { height: 28px; }
+
+    #sketch-holder { min-width: 0; display: flex; align-items: center; justify-content: center; height: 100vh; background: var(--gui-bg); }
+    canvas { display: block; }
+  </style>
+</head>
+
+<body>
+  <div id="pane-holder"></div>
+  <div id="sketch-holder"></div>
+
+  <!-- p5.js 本体（先に読み込む） -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.3/p5.min.js"></script>
+  <!-- opentype.js (textToPoints に必要) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/opentype.js/1.3.4/opentype.min.js"></script>
+  <!-- p5.capture（連番画像キャプチャ） -->
+  <script src="https://cdn.jsdelivr.net/npm/p5.capture@1.6.0/dist/p5.capture.umd.min.js"></script>
+
+  <!-- パラメータ（sketch.js が参照する） -->
+  <script>
+    const DEFAULT_PARAMS = {
+      circleSize: 20,          // タイルのサイズ
+      tileAngle: 0,            // タイルの角度（度）
+      tileAspect: 1,           // タイルの縦横比（幅/高さ）
+      tileRound: 0,            // 角丸の強さ（%、100で完全な丸）
+      count: 5,                // 円の数（sampleFactor × 100）
+      hScale: 100,             // 長体
+      seed: 0,                 // シード
+      jitter: 10,              // ばらけ
+      densityScale: 30,        // 疎密の波長
+      densityContrast: 70      // 疎密の強さ
+    };
+    const LS_KEY = 'pix_params';
+    const params = Object.assign({}, DEFAULT_PARAMS);
+    try {
+      Object.assign(params, JSON.parse(localStorage.getItem(LS_KEY) || '{}'));
+    } catch (e) { /* 壊れた保存値は無視 */ }
+  </script>
+
+  <script type="module">
+    import { Pane } from 'https://cdn.jsdelivr.net/npm/tweakpane@4.0.4/dist/tweakpane.min.js';
+
+    const pane = new Pane({
+      container: document.getElementById('pane-holder'),
+      title: 'Difference Ellipses'
+    });
+
+    const save = () => {
+      try { localStorage.setItem(LS_KEY, JSON.stringify(params)); } catch (e) { }
+    };
+
+    const tile = pane.addFolder({ title: 'Tile' });
+    tile.addBinding(params, 'circleSize', { label: 'Size', min: 2, max: 80, step: 1 });
+    tile.addBinding(params, 'tileAngle', { label: 'Angle', min: -180, max: 180, step: 1 });
+    tile.addBinding(params, 'tileAspect', { label: 'Aspect', min: 0.1, max: 5, step: 0.05 });
+    tile.addBinding(params, 'tileRound', { label: 'Round', min: 0, max: 100, step: 1 });
+
+    const shape = pane.addFolder({ title: 'Shape' });
+    shape.addBinding(params, 'count', { label: 'Count', min: 1, max: 30, step: 1 });
+    shape.addBinding(params, 'hScale', { label: 'Condense', min: 30, max: 100, step: 1 });
+
+    const dist = pane.addFolder({ title: 'Distribution' });
+    dist.addBinding(params, 'seed', { label: 'Seed', min: 0, max: 999, step: 1 });
+    dist.addBinding(params, 'jitter', { label: 'Jitter', min: 0, max: 60, step: 1 });
+    dist.addBinding(params, 'densityScale', { label: 'Density Scale', min: 1, max: 100, step: 1 });
+    dist.addBinding(params, 'densityContrast', { label: 'Density Contrast', min: 0, max: 100, step: 1 });
+
+    pane.addButton({ title: 'Reset Params' }).on('click', () => {
+      Object.assign(params, DEFAULT_PARAMS);
+      pane.refresh();
+      save();
+    });
+
+    pane.on('change', save);
+  </script>
+
+  <script src="sketch.js"></script>
+</body>
+
+</html>
