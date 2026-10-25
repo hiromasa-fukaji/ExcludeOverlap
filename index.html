@@ -64,6 +64,7 @@
     #pane-holder .tp-fldv_m { display: none; }
     #pane-holder .tp-rotv_t { font-size: 13px; line-height: 40px; }
     #pane-holder .tp-btnv_b { height: 28px; }
+    #pane-holder .tp-ckbv_l { display: flex; justify-content: flex-end; }
 
     #sketch-holder { min-width: 0; display: flex; align-items: center; justify-content: center; height: 100vh; background: var(--gui-bg); }
     canvas { display: block; }
@@ -76,8 +77,6 @@
 
   <!-- p5.js 本体（先に読み込む） -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.3/p5.min.js"></script>
-  <!-- opentype.js (textToPoints に必要) -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/opentype.js/1.3.4/opentype.min.js"></script>
   <!-- p5.capture（連番画像キャプチャ） -->
   <script src="https://cdn.jsdelivr.net/npm/p5.capture@1.6.0/dist/p5.capture.umd.min.js"></script>
 
@@ -87,7 +86,14 @@
       circleSize: 20,          // タイルのサイズ
       tileAngle: 0,            // タイルの角度（度）
       tileAspect: 1,           // タイルの縦横比（幅/高さ）
+      fontName: 'serif',                // フォント（システムフォント名。serif は OS 標準の明朝/セリフ）
+      text: 'a',               // 表示する文字
+      fontSize: 700,           // 文字サイズ（px）
+      source: 'text',          // 点の元: 'text'（文字）| 'svg'（読み込んだ SVG）
+      svgScale: 100,           // SVG の大きさ（%、100 でキャンバスに収まる大きさ）
+      showText: false,         // 文字のタイルを表示するか（初期は非表示）
       mode: 'outline',         // 'outline'（輪郭）| 'fill'（塗りつぶしグリッド）
+      tilesPerCell: 1,         // Fill: 1セルに横並びで置くタイルの数
       gridStep: 12,            // 塗りつぶしモードのセルサイズ（px）
       trailMode: 'trail',      // 'trail'（軌跡）| 'fill'（ブラシで塗りつぶし）
       brushSize: 60,           // ブラシの直径（px）
@@ -115,6 +121,43 @@
       title: 'Difference Ellipses'
     });
 
+    // OS に入っているフォントを候補から検出する（canvas の文字幅が代替フォントと違えば入っているとみなす）
+    const CANDIDATE_FONTS = [
+      'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy',
+      // 欧文
+      'Arial', 'Arial Black', 'Arial Narrow', 'Arial Rounded MT Bold', 'American Typewriter', 'Andale Mono',
+      'Avenir', 'Avenir Next', 'Baskerville', 'Big Caslon', 'Bodoni 72', 'Book Antiqua', 'Bookman Old Style',
+      'Bradley Hand', 'Brush Script MT', 'Calibri', 'Cambria', 'Candara', 'Century Gothic', 'Chalkboard',
+      'Charter', 'Cochin', 'Comic Sans MS', 'Consolas', 'Constantia', 'Cooper Black', 'Copperplate', 'Corbel',
+      'Courier', 'Courier New', 'Didot', 'Futura', 'Franklin Gothic Medium', 'Garamond', 'Geneva', 'Georgia',
+      'Gill Sans', 'Helvetica', 'Helvetica Neue', 'Herculanum', 'Hoefler Text', 'Impact', 'Ink Free',
+      'Lucida Console', 'Lucida Grande', 'Lucida Sans Unicode', 'Luminari', 'Marker Felt', 'Menlo', 'Mistral',
+      'Monaco', 'Noteworthy', 'Optima', 'Palatino', 'Palatino Linotype', 'Papyrus', 'Perpetua', 'Phosphate',
+      'Rockwell', 'Segoe UI', 'Skia', 'Snell Roundhand', 'Tahoma', 'Times', 'Times New Roman', 'Trebuchet MS',
+      'Verdana', 'Zapfino',
+      // 日本語
+      'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Hiragino Kaku Gothic Pro', 'Hiragino Mincho ProN',
+      'Hiragino Maru Gothic ProN', 'Yu Gothic', 'Yu Mincho', 'YuKyokasho', 'Meiryo', 'MS Gothic', 'MS PGothic',
+      'MS Mincho', 'MS PMincho', 'Osaka', 'Toppan Bunkyu Mincho', 'Klee',
+      // 中国語・韓国語
+      'PingFang SC', 'PingFang TC', 'Heiti SC', 'Songti SC', 'Microsoft YaHei', 'SimSun', 'SimHei',
+      'Apple SD Gothic Neo', 'Malgun Gothic', 'Batang', 'Gulim'
+    ];
+    const isFontAvailable = (() => {
+      const ctx = document.createElement('canvas').getContext('2d');
+      const bases = ['monospace', 'serif', 'sans-serif'];
+      const sample = 'mmmmmmmmmmlli あ 永 Wg';
+      const width = (font) => { ctx.font = `72px ${font}`; return ctx.measureText(sample).width; };
+      const baseWidths = bases.map(width);
+      return (name) => bases.some((b, i) => width(`"${name}", ${b}`) !== baseWidths[i]);
+    })();
+    const availableFonts = CANDIDATE_FONTS.filter(n => ['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy'].includes(n) || isFontAvailable(n));
+    const fontOptions = Object.fromEntries(availableFonts.map(n => [n, n]));
+    // 読み込んだ SVG は保存されないので、起動時は文字に戻す
+    params.source = 'text';
+    // 保存済みのフォントがこの PC にない場合は既定に戻す
+    if (!(params.fontName in fontOptions)) params.fontName = DEFAULT_PARAMS.fontName;
+
     const save = () => {
       try { localStorage.setItem(LS_KEY, JSON.stringify(params)); } catch (e) { }
     };
@@ -132,8 +175,16 @@
     trail.addButton({ title: 'Clear Trail' }).on('click', () => clearTrail());
 
     const shape = pane.addFolder({ title: 'Shape' });
+    shape.addBinding(params, 'showText', { label: 'Show Text' });
+
+    shape.addBinding(params, 'source', { label: 'Source', options: { Text: 'text', SVG: 'svg' } });
+    shape.addBinding(params, 'svgScale', { label: 'SVG Scale', min: 10, max: 300, step: 1 });
+    shape.addBinding(params, 'text', { label: 'Text' });
+    shape.addBinding(params, 'fontSize', { label: 'Font Size', min: 50, max: 1500, step: 10 });
+    shape.addBinding(params, 'fontName', { label: 'Font', options: fontOptions });
     shape.addBinding(params, 'mode', { label: 'Mode', options: { Outline: 'outline', Fill: 'fill' } });
     shape.addBinding(params, 'gridStep', { label: 'Cell Size', min: 2, max: 30, step: 1 });
+    shape.addBinding(params, 'tilesPerCell', { label: 'Tiles per Cell', min: 1, max: 10, step: 1 });
     shape.addBinding(params, 'count', { label: 'Count', min: 1, max: 30, step: 1 });
     shape.addBinding(params, 'hScale', { label: 'Condense', min: 30, max: 100, step: 1 });
 
@@ -148,6 +199,26 @@
       pane.refresh();
       save();
     });
+
+    // SVG を読み込んで、その形に沿ってタイルを配置する
+    const svgInput = document.createElement('input');
+    svgInput.type = 'file';
+    svgInput.accept = '.svg,image/svg+xml';
+    svgInput.addEventListener('change', async () => {
+      const file = svgInput.files[0];
+      svgInput.value = ''; // 同じファイルを続けて選べるように
+      if (!file) return;
+      try {
+        await loadSVG(await file.text());
+        params.source = 'svg';
+        params.showText = true;
+        pane.refresh();
+        save();
+      } catch (e) {
+        alert(e.message);
+      }
+    });
+    pane.addButton({ title: 'Import SVG' }).on('click', () => svgInput.click());
 
     pane.addButton({ title: 'Export SVG' }).on('click', () => exportSVG());
 
@@ -165,6 +236,10 @@
       e.preventDefault();
     });
   </script>
+
+  <!-- 輪郭抽出（システムフォントのラスターから等値線を取る） -->
+  <script src="https://cdn.jsdelivr.net/npm/d3-array@3.2.4/dist/d3-array.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3-contour@4.0.2/dist/d3-contour.min.js"></script>
 
   <script src="sketch.js"></script>
 </body>

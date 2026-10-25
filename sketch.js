@@ -5,7 +5,6 @@ P5Capture.setDefaultOptions({ format: "png", framerate: 30, disableUi: true });
 const INITIAL_W = 630;
 const INITIAL_H = 891;
 
-let myFont;
 let fontPoints = [];
 let movingPoints = []; // 各ピクセルの軌道情報を保持
 let pointsKey = ''; // 点の生成条件。変わったら再生成する
@@ -43,7 +42,7 @@ function paintBrush(x, y) {
       const key = `${step}:${kx},${ky}`; // 同じセルに重複して置かない
       if (brushCells.has(key)) continue;
       brushCells.add(key);
-      trailPoints.push({ x: cx, y: cy });
+      trailPoints.push({ x: cx, y: cy, cell: step }); // cell: ブラシで塗ったセルの幅
     }
   }
 }
@@ -111,72 +110,226 @@ function mouseReleased() {
   isDragging = false;
 }
 
-// === 描画するテキストとサイズ ===
-let myText = "a";
-let fontSize = 700; // キャンバスサイズ(400x400)に合わせて調整
+// === フォント ===
+// OS に入っているシステムフォント（CSS のフォント名）を canvas に描き、そのラスターから点を作る。
+const GENERIC_FAMILIES = ['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy'];
+
+// === 描画するテキストとサイズ（GUI の Text / Font Size） ===
 
 // 現在のパラメータから点の生成条件を表すキーを作る
 function makePointsKey() {
-  return params.mode === 'fill'
-    ? `fill:${params.gridStep}`
-    : `outline:${params.count}`;
+  const modeKey = params.mode === 'fill' ? `fill:${params.gridStep}` : `outline:${params.count}`;
+  const srcKey = params.source === 'svg'
+    ? `svg:${svgVersion}:${params.svgScale}`
+    : `text:${params.fontName}:${params.fontSize}:${params.text}`;
+  return `${modeKey}:${srcKey}`;
 }
 
-// 文字の塗りつぶしをスキャンして、グリッド状の点を作る
-function generateFillPoints(startX, startY) {
-  const step = params.gridStep;
+// === SVG 読み込み ===
+// Outline: SVG のパス上を getPointAtLength でたどって点を取る（線の太さに関係なくパスそのもの）。
+// Fill: 全図形を黒で塗りつぶした SVG 画像をキャンバスに描き、塗りつぶしをスキャンする。
+let svgFillImage = null;  // 塗りつぶし用に描き直した画像
+let svgHost = null;       // パスを測るために DOM に置いた SVG
+let svgShapes = [];       // {el, m, ranges}: 図形・root への変換行列・サブパスごとの長さ範囲
+let svgSize = { x: 0, y: 0, w: 1, h: 1 }; // viewBox
+let svgVersion = 0;       // 読み込むたびに増やし、点を再生成させる
+
+// path の d を M/m ごとのサブパスに分け、getPointAtLength 上の長さ範囲 [from, to] を返す
+// （moveto は長さに数えられないので、手前までの d の長さがそのままサブパスの開始位置になる）
+function subpathRanges(pathEl, svgEl) {
+  const d = pathEl.getAttribute('d') || '';
+  const starts = [...d.matchAll(/[Mm]/g)].map(m => m.index).filter(i => i > 0);
+  const tmp = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  svgEl.appendChild(tmp);
+  const bounds = [0];
+  for (const i of starts) {
+    tmp.setAttribute('d', d.slice(0, i));
+    bounds.push(tmp.getTotalLength());
+  }
+  tmp.remove();
+  bounds.push(pathEl.getTotalLength());
+  const ranges = [];
+  for (let i = 0; i + 1 < bounds.length; i++) {
+    if (bounds[i + 1] - bounds[i] > 0) ranges.push([bounds[i], bounds[i + 1]]);
+  }
+  return ranges;
+}
+
+function loadSVG(text) {
+  return new Promise((resolve, reject) => {
+    const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+    const root = doc.documentElement;
+    if (doc.querySelector('parsererror') || root.localName !== 'svg') {
+      reject(new Error('SVG を解析できませんでした'));
+      return;
+    }
+    // 寸法は viewBox を優先し、なければ width/height
+    let vb = (root.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+    if (!(vb.length === 4 && vb[2] > 0 && vb[3] > 0)) {
+      vb = [0, 0, parseFloat(root.getAttribute('width')) || 100, parseFloat(root.getAttribute('height')) || 100];
+      root.setAttribute('viewBox', vb.join(' '));
+    }
+    // 画面上で 1 ユーザー単位 = 1px になるよう寸法と名前空間を明示する
+    root.setAttribute('width', vb[2]);
+    root.setAttribute('height', vb[3]);
+    root.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    const source = new XMLSerializer().serializeToString(root);
+
+    // --- Outline 用: DOM に置いてパスを測れるようにする ---
+    if (svgHost) svgHost.remove();
+    const host = document.createElement('div');
+    host.style.cssText = 'position:absolute;left:-99999px;top:0;visibility:hidden;pointer-events:none;';
+    host.innerHTML = source;
+    document.body.appendChild(host);
+    const svgEl = host.querySelector('svg');
+    const rootInv = svgEl.getScreenCTM().inverse();
+    const shapes = [];
+    for (const el of svgEl.querySelectorAll('path,rect,circle,ellipse,line,polyline,polygon')) {
+      if (el.closest('defs,clipPath,mask,symbol,marker,pattern')) continue;
+      const ranges = el.localName === 'path' ? subpathRanges(el, svgEl) : [[0, el.getTotalLength()]];
+      shapes.push({ el, m: rootInv.multiply(el.getScreenCTM()), ranges });
+    }
+
+    // --- Fill 用: 全図形を黒で塗りつぶし（線は消す）、塗りつぶした画像を作る ---
+    const fillRoot = root.cloneNode(true);
+    const style = doc.createElementNS('http://www.w3.org/2000/svg', 'style');
+    style.textContent = 'path,rect,circle,ellipse,polygon,polyline{fill:#000 !important;stroke:none !important}';
+    fillRoot.insertBefore(style, fillRoot.firstChild);
+    const img = new Image();
+    img.onload = () => {
+      svgHost = host;
+      svgShapes = shapes;
+      svgFillImage = img;
+      svgSize = { x: vb[0], y: vb[1], w: vb[2], h: vb[3] };
+      svgVersion++;
+      resolve();
+    };
+    img.onerror = () => { host.remove(); reject(new Error('SVG を描画できませんでした')); };
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(fillRoot));
+  });
+}
+
+// SVG をキャンバスの 90% に収め、SVG Scale を掛けて中央に置くための倍率と原点
+function svgFit() {
+  const k = Math.min(width * 0.9 / svgSize.w, height * 0.9 / svgSize.h) * params.svgScale / 100;
+  return { k, ox: (width - svgSize.w * k) / 2, oy: (height - svgSize.h * k) / 2 };
+}
+
+// Outline: 全パスを Count に応じた間隔でたどり、キャンバス座標の点にする
+function generateSvgOutlinePoints() {
+  const { k, ox, oy } = svgFit();
+  const step = 100 / params.count / k; // キャンバス上の間隔を SVG 単位に直す
+  const pts = [];
+  for (const { el, m, ranges } of svgShapes) {
+    for (const [from, to] of ranges) {
+      for (let len = from; len < to; len += step) {
+        const p = el.getPointAtLength(len);
+        const x = m.a * p.x + m.c * p.y + m.e;
+        const y = m.b * p.x + m.d * p.y + m.f;
+        pts.push({ x: ox + (x - svgSize.x) * k, y: oy + (y - svgSize.y) * k });
+      }
+    }
+  }
+  return pts;
+}
+
+// 点の元になる「描かれた範囲」を 0〜255 のカバレッジとして返す（width × height、1ピクセル1要素）
+function getCoverage() {
   const g = createGraphics(width, height);
   g.pixelDensity(1);
-  g.background(255);
-  g.fill(0);
-  g.noStroke();
-  g.textFont(myFont);
-  g.textSize(fontSize);
-  g.text(myText, startX, startY);
-  g.loadPixels();
+  const ctx = g.drawingContext;
+  const cov = new Uint8Array(width * height);
+
+  if (params.source === 'svg') {
+    // 透明な背景に塗りつぶした SVG を描き、アルファ値を使う
+    if (svgFillImage) {
+      const { k, ox, oy } = svgFit();
+      ctx.drawImage(svgFillImage, ox, oy, svgSize.w * k, svgSize.h * k);
+    }
+    g.loadPixels();
+    for (let i = 0; i < cov.length; i++) cov[i] = g.pixels[i * 4 + 3];
+  } else {
+    // 白背景に文字を黒で描き、暗さを使う
+    g.background(255);
+    const family = GENERIC_FAMILIES.includes(params.fontName) ? params.fontName : `"${params.fontName}"`;
+    ctx.font = `${params.fontSize}px ${family}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = '#000';
+    // 実際のインク範囲で中央に揃える
+    const m = ctx.measureText(params.text);
+    const x = width / 2 - (m.actualBoundingBoxRight - m.actualBoundingBoxLeft) / 2;
+    const y = height / 2 + (m.actualBoundingBoxAscent - m.actualBoundingBoxDescent) / 2;
+    ctx.fillText(params.text, x, y);
+    g.loadPixels();
+    for (let i = 0; i < cov.length; i++) cov[i] = 255 - g.pixels[i * 4];
+  }
+  g.remove();
+  return cov;
+}
+
+// 塗りつぶしをスキャンして、グリッド状の点を作る
+function generateFillPoints() {
+  const step = params.gridStep;
+  const cov = getCoverage();
 
   const pts = [];
   for (let y = step / 2; y < height; y += step) {
     for (let x = step / 2; x < width; x += step) {
-      // セル中心のピクセルが暗ければ文字の内側
-      const idx = (Math.floor(y) * width + Math.floor(x)) * 4;
-      if (g.pixels[idx] < 128) pts.push({ x, y });
+      // セル中心のピクセルが描かれていれば内側
+      if (cov[Math.floor(y) * width + Math.floor(x)] > 127) pts.push({ x, y });
     }
   }
-  g.remove();
   return pts;
 }
 
-// 点を生成（モード・円の数・グリッド解像度の変更時に再実行）
+// 閉じた輪郭 ring に沿って spacing ごとに点を打つ
+function resampleRing(ring, spacing, out) {
+  let pos = 0; // 現在の線分上で、次に点を打つ位置
+  for (let i = 1; i < ring.length; i++) {
+    const [x0, y0] = ring[i - 1], [x1, y1] = ring[i];
+    const len = Math.hypot(x1 - x0, y1 - y0);
+    while (pos <= len) {
+      const t = len ? pos / len : 0;
+      out.push({ x: x0 + (x1 - x0) * t, y: y0 + (y1 - y0) * t });
+      pos += spacing;
+    }
+    pos -= len;
+  }
+}
+
+// ラスターから輪郭（等値線 0.5）を取り、Count に応じた間隔で点を打つ
+function generateOutlinePointsFromRaster() {
+  const cov = getCoverage();
+  const values = new Float32Array(cov.length);
+  for (let i = 0; i < values.length; i++) values[i] = cov[i] / 255;
+
+  const spacing = 100 / params.count; // textToPoints の sampleFactor (= count/100) 相当
+  const pts = [];
+  const multiPolygon = d3.contours().size([width, height]).thresholds([0.5])(values)[0];
+  if (!multiPolygon) return pts; // 何も描かれていない場合
+  for (const polygon of multiPolygon.coordinates) {
+    for (const ring of polygon) resampleRing(ring, spacing, pts);
+  }
+  return pts;
+}
+
+// 点を生成（モード・円の数・グリッド解像度・フォントの変更時に再実行）
 function generatePoints() {
   pointsKey = makePointsKey();
 
-  // 1. テキストの実際の幅と高さを測る
-  let bounds = myFont.textBounds(myText, 0, 0, fontSize);
-  
-  // 2. 画面のど真ん中に来るように開始座標(x, y)を逆算する
-  let startX = width / 2 - bounds.w / 2 - bounds.x;
-  let startY = height / 2 - bounds.h / 2 - bounds.y;
-
-  // 3. 計算した座標を使ってパス（点）を生成
   if (params.mode === 'fill') {
-    fontPoints = generateFillPoints(startX, startY);
+    fontPoints = generateFillPoints();
+  } else if (params.source === 'svg') {
+    fontPoints = generateSvgOutlinePoints();
   } else {
-    fontPoints = myFont.textToPoints(myText, startX, startY, fontSize, {
-      sampleFactor: params.count / 100,
-      simplifyThreshold: 0
-    });
+    fontPoints = generateOutlinePointsFromRaster();
   }
 
   // movingPoints を再構築
   movingPoints = fontPoints.map(p => ({
     origin: createVector(p.x, p.y)        // 元の位置
   }));
-}
-
-// 1. フォントファイルを読み込む
-function preload() {
-  myFont = loadFont('CormorantGaramond-SemiBold.ttf');
 }
 
 function setup() {
@@ -206,6 +359,15 @@ function drawTile(w, h, t) {
   ctx.fill();
 }
 
+// セル中心 (x, y) にタイルを置く。cellWidth > 0（Fill）なら、セルの幅を等分して
+// Tiles per Cell 個のタイルを横並びに置く
+function pushCellTiles(tiles, x, y, cellWidth) {
+  const n = cellWidth > 0 ? params.tilesPerCell : 1;
+  for (let j = 0; j < n; j++) {
+    tiles.push({ x: x + ((j + 0.5) / n - 0.5) * cellWidth, y });
+  }
+}
+
 // 描画するタイルの中心位置を全て計算する（輪郭/塗りつぶし + ドラッグの軌跡）
 function computeTiles() {
   const jitter = params.jitter;
@@ -218,7 +380,8 @@ function computeTiles() {
   randomSeed(params.seed);
   noiseSeed(params.seed);
 
-  for (let i = 0; i < movingPoints.length; i++) {
+  // 文字のタイルは Text が ON のときだけ置く（初期は真っ白なキャンバス）
+  for (let i = 0; params.showText && i < movingPoints.length; i++) {
     const pt = movingPoints[i];
 
     // 疎密判定（疎密フィルタはここだけ）
@@ -233,11 +396,11 @@ function computeTiles() {
 
     // 長体に合わせて x 座標をスケール
     const drawX = width / 2 + (pt.origin.x - width / 2) * hScale;
-    tiles.push({ x: drawX + offsetX, y: pt.origin.y + offsetY });
+    pushCellTiles(tiles, drawX + offsetX, pt.origin.y + offsetY, params.mode === 'fill' ? params.gridStep * hScale : 0);
   }
 
   // マウスドラッグの軌跡にも同じタイルを置く
-  for (const tp of trailPoints) tiles.push(tp);
+  for (const tp of trailPoints) pushCellTiles(tiles, tp.x, tp.y, tp.cell || 0);
   return tiles;
 }
 
