@@ -371,7 +371,6 @@ function pushCellTiles(tiles, x, y, cellWidth) {
 // 描画するタイルの中心位置を全て計算する（輪郭/塗りつぶし + ドラッグの軌跡）
 function computeTiles() {
   const jitter = params.jitter;
-  const hScale = params.hScale / 100;
   const densityScale = params.densityScale / 100;
   const densityContrast = params.densityContrast / 100;
   const tiles = [];
@@ -394,9 +393,7 @@ function computeTiles() {
     const offsetX = random(-jitter, jitter);
     const offsetY = random(-jitter, jitter);
 
-    // 長体に合わせて x 座標をスケール
-    const drawX = width / 2 + (pt.origin.x - width / 2) * hScale;
-    pushCellTiles(tiles, drawX + offsetX, pt.origin.y + offsetY, params.mode === 'fill' ? params.gridStep * hScale : 0);
+    pushCellTiles(tiles, pt.origin.x + offsetX, pt.origin.y + offsetY, params.mode === 'fill' ? params.gridStep : 0);
   }
 
   // マウスドラッグの軌跡にも同じタイルを置く

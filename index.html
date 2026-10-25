@@ -100,7 +100,6 @@
       trailSpacing: 10,        // 軌跡のタイル間隔（px）
       tileRound: 0,            // 角丸の強さ（%、100で完全な丸）
       count: 5,                // 円の数（sampleFactor × 100）
-      hScale: 100,             // 長体
       seed: 0,                 // シード
       jitter: 10,              // ばらけ
       densityScale: 30,        // 疎密の波長
@@ -165,7 +164,7 @@
     const tile = pane.addFolder({ title: 'Tile' });
     tile.addBinding(params, 'circleSize', { label: 'Size', min: 2, max: 200, step: 1 });
     tile.addBinding(params, 'tileAngle', { label: 'Angle', min: -180, max: 180, step: 1 });
-    tile.addBinding(params, 'tileAspect', { label: 'Aspect', min: 0.1, max: 5, step: 0.05 });
+    tile.addBinding(params, 'tileAspect', { label: 'Aspect', min: 1, max: 5, step: 0.05 });
     tile.addBinding(params, 'tileRound', { label: 'Round', min: 0, max: 100, step: 1 });
 
     const trail = pane.addFolder({ title: 'Trail' });
@@ -186,7 +185,6 @@
     shape.addBinding(params, 'gridStep', { label: 'Cell Size', min: 2, max: 30, step: 1 });
     shape.addBinding(params, 'tilesPerCell', { label: 'Tiles per Cell', min: 1, max: 10, step: 1 });
     shape.addBinding(params, 'count', { label: 'Count', min: 1, max: 30, step: 1 });
-    shape.addBinding(params, 'hScale', { label: 'Condense', min: 30, max: 100, step: 1 });
 
     const dist = pane.addFolder({ title: 'Distribution' });
     dist.addBinding(params, 'seed', { label: 'Seed', min: 0, max: 999, step: 1 });
