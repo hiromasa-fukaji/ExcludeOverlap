@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Difference Ellipses</title>
+  <title>Exclude Overlap</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -84,26 +84,31 @@
   <script>
     const DEFAULT_PARAMS = {
       circleSize: 20,          // タイルのサイズ
-      tileAngle: 0,            // タイルの角度（度）
-      tileAspect: 1,           // タイルの縦横比（幅/高さ）
+      pixAngle: 0,            // タイルの角度（度）
+      pixAspect: 1,           // タイルの縦横比（幅/高さ）
       fontName: 'serif',                // フォント（システムフォント名。serif は OS 標準の明朝/セリフ）
       text: 'a',               // 表示する文字
       fontSize: 700,           // 文字サイズ（px）
-      source: 'text',          // 点の元: 'text'（文字）| 'svg'（読み込んだ SVG）
+      showSvg: false,          // 読み込んだ SVG のタイルを表示するか（Show Text とは独立）
       svgScale: 100,           // SVG の大きさ（%、100 でキャンバスに収まる大きさ）
       showText: false,         // 文字のタイルを表示するか（初期は非表示）
       mode: 'outline',         // 'outline'（輪郭）| 'fill'（塗りつぶしグリッド）
-      tilesPerCell: 1,         // Fill: 1セルに横並びで置くタイルの数
+      pixPerCell: 1,         // Fill: 1セルに横並びで置くタイルの数
+      svgMode: 'outline',      // SVG 用（Text とは別々の設定）
+      svgGridStep: 12,
+      svgPixPerCell: 1,
+      svgCount: 5,
+      trailGridStep: 12,       // ブラシ（Trail の Fill）用のセルサイズ
+      trailPixPerCell: 1,    // ブラシ用の横並びタイル数
       gridStep: 12,            // 塗りつぶしモードのセルサイズ（px）
       trailMode: 'trail',      // 'trail'（軌跡）| 'fill'（ブラシで塗りつぶし）
       brushSize: 60,           // ブラシの直径（px）
       trailSpacing: 10,        // 軌跡のタイル間隔（px）
-      tileRound: 0,            // 角丸の強さ（%、100で完全な丸）
+      pixRound: 0,            // 角丸の強さ（%、100で完全な丸）
       count: 5,                // 円の数（sampleFactor × 100）
       seed: 0,                 // シード
       jitter: 10,              // ばらけ
-      densityScale: 30,        // 疎密の波長
-      densityContrast: 70      // 疎密の強さ
+      thinOut: 30              // 間引く割合（%）
     };
     const LS_KEY = 'pix_params';
     const params = Object.assign({}, DEFAULT_PARAMS);
@@ -117,7 +122,7 @@
 
     const pane = new Pane({
       container: document.getElementById('pane-holder'),
-      title: 'Difference Ellipses'
+      title: 'Exclude Overlap'
     });
 
     // OS に入っているフォントを候補から検出する（canvas の文字幅が代替フォントと違えば入っているとみなす）
@@ -153,7 +158,7 @@
     const availableFonts = CANDIDATE_FONTS.filter(n => ['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy'].includes(n) || isFontAvailable(n));
     const fontOptions = Object.fromEntries(availableFonts.map(n => [n, n]));
     // 読み込んだ SVG は保存されないので、起動時は文字に戻す
-    params.source = 'text';
+    params.showSvg = false;
     // 保存済みのフォントがこの PC にない場合は既定に戻す
     if (!(params.fontName in fontOptions)) params.fontName = DEFAULT_PARAMS.fontName;
 
@@ -161,40 +166,69 @@
       try { localStorage.setItem(LS_KEY, JSON.stringify(params)); } catch (e) { }
     };
 
-    const tile = pane.addFolder({ title: 'Tile' });
-    tile.addBinding(params, 'circleSize', { label: 'Size', min: 2, max: 200, step: 1 });
-    tile.addBinding(params, 'tileAngle', { label: 'Angle', min: -180, max: 180, step: 1 });
-    tile.addBinding(params, 'tileAspect', { label: 'Aspect', min: 1, max: 5, step: 0.05 });
-    tile.addBinding(params, 'tileRound', { label: 'Round', min: 0, max: 100, step: 1 });
-
-    const trail = pane.addFolder({ title: 'Trail' });
+    const trail = pane.addFolder({ title: 'Brush' });
     trail.addBinding(params, 'trailMode', { label: 'Mode', options: { Trail: 'trail', Fill: 'fill' } });
-    trail.addBinding(params, 'trailSpacing', { label: 'Spacing', min: 1, max: 100, step: 1 });
-    trail.addBinding(params, 'brushSize', { label: 'Brush Size', min: 4, max: 300, step: 1 });
-    trail.addButton({ title: 'Clear Trail' }).on('click', () => clearTrail());
+    const trailOnly = [trail.addBinding(params, 'trailSpacing', { label: 'Spacing', min: 1, max: 100, step: 1 })];
+    const fillOnly = [
+      trail.addBinding(params, 'brushSize', { label: 'Brush Size', min: 4, max: 300, step: 1 }),
+      trail.addBinding(params, 'trailGridStep', { label: 'Cell Size', min: 2, max: 30, step: 1 }),
+      trail.addBinding(params, 'trailPixPerCell', { label: 'Pix Count', min: 1, max: 10, step: 1 })
+    ];
+    // Mode に応じて、効く項目だけを表示する（Trail: Spacing / Fill: Brush Size・Cell Size・Pix Count）
+    const updateBrushVisibility = () => {
+      const fill = params.trailMode === 'fill';
+      trailOnly.forEach(b => { b.hidden = fill; });
+      fillOnly.forEach(b => { b.hidden = !fill; });
+    };
+    updateBrushVisibility();
 
-    const shape = pane.addFolder({ title: 'Shape' });
-    shape.addBinding(params, 'showText', { label: 'Show Text' });
+    // Text / SVG それぞれに持つ配置の設定（キー名の接頭辞だけ違い、値は別々）
+    // Mode に応じて効く項目だけを表示する（Outline: Count / Fill: Cell Size・Pix Count）
+    const shapeVisibilityUpdaters = [];
+    const addShapeSettings = (folder, k) => {
+      folder.addBinding(params, k.mode, { label: 'Mode', options: { Outline: 'outline', Fill: 'fill' } });
+      const fillOnly = [
+        folder.addBinding(params, k.gridStep, { label: 'Cell Size', min: 2, max: 30, step: 1 }),
+        folder.addBinding(params, k.pix, { label: 'Pix Count', min: 1, max: 10, step: 1 })
+      ];
+      const outlineOnly = [folder.addBinding(params, k.count, { label: 'Count', min: 1, max: 30, step: 1 })];
+      const update = () => {
+        const fill = params[k.mode] === 'fill';
+        fillOnly.forEach(bd => { bd.hidden = !fill; });
+        outlineOnly.forEach(bd => { bd.hidden = fill; });
+      };
+      update();
+      shapeVisibilityUpdaters.push(update);
+    };
 
-    shape.addBinding(params, 'source', { label: 'Source', options: { Text: 'text', SVG: 'svg' } });
-    shape.addBinding(params, 'svgScale', { label: 'SVG Scale', min: 10, max: 300, step: 1 });
-    shape.addBinding(params, 'text', { label: 'Text' });
-    shape.addBinding(params, 'fontSize', { label: 'Font Size', min: 50, max: 1500, step: 10 });
-    shape.addBinding(params, 'fontName', { label: 'Font', options: fontOptions });
-    shape.addBinding(params, 'mode', { label: 'Mode', options: { Outline: 'outline', Fill: 'fill' } });
-    shape.addBinding(params, 'gridStep', { label: 'Cell Size', min: 2, max: 30, step: 1 });
-    shape.addBinding(params, 'tilesPerCell', { label: 'Tiles per Cell', min: 1, max: 10, step: 1 });
-    shape.addBinding(params, 'count', { label: 'Count', min: 1, max: 30, step: 1 });
+    const textFolder = pane.addFolder({ title: 'Text' });
+    textFolder.addBinding(params, 'showText', { label: 'Show Text' });
+    textFolder.addBinding(params, 'text', { label: 'Text' });
+    textFolder.addBinding(params, 'fontSize', { label: 'Font Size', min: 50, max: 1500, step: 10 });
+    textFolder.addBinding(params, 'fontName', { label: 'Font', options: fontOptions });
+    addShapeSettings(textFolder, { mode: 'mode', gridStep: 'gridStep', pix: 'pixPerCell', count: 'count' });
 
-    const dist = pane.addFolder({ title: 'Distribution' });
+    const svgFolder = pane.addFolder({ title: 'SVG' });
+    svgFolder.addBinding(params, 'showSvg', { label: 'Show SVG' });
+    svgFolder.addBinding(params, 'svgScale', { label: 'SVG Scale', min: 10, max: 300, step: 1 });
+    addShapeSettings(svgFolder, { mode: 'svgMode', gridStep: 'svgGridStep', pix: 'svgPixPerCell', count: 'svgCount' });
+
+    const pix = pane.addFolder({ title: 'Pix Shape' });
+    pix.addBinding(params, 'circleSize', { label: 'Size', min: 2, max: 200, step: 1 });
+    pix.addBinding(params, 'pixAngle', { label: 'Angle', min: -180, max: 180, step: 1 });
+    pix.addBinding(params, 'pixAspect', { label: 'Aspect', min: 1, max: 5, step: 0.05 });
+    pix.addBinding(params, 'pixRound', { label: 'Round', min: 0, max: 100, step: 1 });
+
+    const dist = pane.addFolder({ title: 'Pix Arrangement' });
     dist.addBinding(params, 'seed', { label: 'Seed', min: 0, max: 999, step: 1 });
     dist.addBinding(params, 'jitter', { label: 'Jitter', min: 0, max: 60, step: 1 });
-    dist.addBinding(params, 'densityScale', { label: 'Density Scale', min: 1, max: 100, step: 1 });
-    dist.addBinding(params, 'densityContrast', { label: 'Density Contrast', min: 0, max: 100, step: 1 });
+    dist.addBinding(params, 'thinOut', { label: 'Reduce', min: 0, max: 100, step: 1 });
 
     pane.addButton({ title: 'Reset Params' }).on('click', () => {
       Object.assign(params, DEFAULT_PARAMS);
       pane.refresh();
+      updateBrushVisibility();
+      shapeVisibilityUpdaters.forEach(f => f());
       save();
     });
 
@@ -208,19 +242,30 @@
       if (!file) return;
       try {
         await loadSVG(await file.text());
-        params.source = 'svg';
-        params.showText = true;
+        params.showSvg = true; // 読み込んだらすぐ表示（Show Text には触らない）
         pane.refresh();
         save();
       } catch (e) {
         alert(e.message);
       }
     });
-    pane.addButton({ title: 'Import SVG' }).on('click', () => svgInput.click());
+    svgFolder.addButton({ title: 'Import SVG' }).on('click', () => svgInput.click());
+
+    pane.addButton({ title: 'Undo' }).on('click', () => undo());
+
+    pane.addButton({ title: 'Clear Canvas' }).on('click', () => clearCanvas());
 
     pane.addButton({ title: 'Export SVG' }).on('click', () => exportSVG());
 
-    pane.on('change', save);
+    pane.on('change', () => { save(); updateBrushVisibility(); shapeVisibilityUpdaters.forEach(f => f()); });
+
+    // Undo: Cmd/Ctrl+Z
+    window.addEventListener('keydown', (e) => {
+      if (e.key.toLowerCase() !== 'z' || !(e.metaKey || e.ctrlKey) || e.shiftKey) return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      undo();
+      e.preventDefault();
+    });
 
     // Illustrator と同じブラシサイズのショートカット（[ で小さく、] で大きく。長押しで連続）
     window.addEventListener('keydown', (e) => {

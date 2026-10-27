@@ -9,27 +9,58 @@ let fontPoints = [];
 let movingPoints = []; // 各ピクセルの軌道情報を保持
 let pointsKey = ''; // 点の生成条件。変わったら再生成する
 
-// === マウスドラッグの軌跡 ===
-let trailPoints = [];   // 軌跡上のタイル位置 {x, y}
-let lastTrailPt = null; // 直前に置いたタイルの位置（ストロークごとにリセット）
-let isDragging = false; // キャンバス上で押下中か
-let brushCells = new Set(); // ブラシで塗り済みのセル
+// === マウスドラッグ ===
+// Trail: 軌跡上にタイルを置く。Fill: ブラシで塗った範囲（スタンプの円）をセルで埋める。
+// Fill はスタンプ（位置と半径）だけを保存し、セルは Cell Size から作り直すので、描いた後でも Cell Size を変えられる。
+let trailStrokes = [];   // Trail の軌跡。ストロークごとのマウス位置の列 [[{x, y}, ...], ...]
+let trailPts = [];       // 軌跡を Spacing ごとに打ち直したタイル位置（描画用）
+let trailBuiltSpacing = null; // trailPts を作ったときの Spacing
+let trailDirty = false;  // 軌跡が変わって trailPts の作り直しが必要か
+let brushStamps = [];    // Fill ブラシのスタンプ {x, y, r}
+let brushPts = [];       // スタンプから作ったセル中心 {x, y}（描画用）
+let brushCells = new Set(); // 作成済みのセル（重複防止）
+let brushBuiltStep = null;  // brushPts を作ったときの Cell Size
+let lastTrailPt = null;  // 直前に置いた位置（ストロークごとにリセット）
+let isDragging = false;  // キャンバス上で押下中か
 
-function clearTrail() {
-  trailPoints = [];
-  brushCells.clear();
+// Undo 用の履歴。ストロークの開始前（と Clear の前）の状態を保存しておく
+const HISTORY_LIMIT = 100;
+let history = [];
+
+function pushHistory() {
+  history.push({ trail: trailStrokes.slice(), stamps: brushStamps.slice() });
+  if (history.length > HISTORY_LIMIT) history.shift();
+}
+
+function undo() {
+  if (!history.length || isDragging) return;
+  const h = history.pop();
+  trailStrokes = h.trail;
+  trailDirty = true;
+  brushStamps = h.stamps;
   lastTrailPt = null;
+  rebuildBrushCells();
+}
+
+// ドラッグで置いたタイルを全て消す（Undo で戻せる）
+function clearCanvas() {
+  if ((!trailStrokes.length && !brushStamps.length) || isDragging) return;
+  pushHistory();
+  trailStrokes = [];
+  trailDirty = true;
+  brushStamps = [];
+  lastTrailPt = null;
+  rebuildBrushCells();
 }
 
 function insideCanvas() {
   return mouseX >= 0 && mouseX <= width && mouseY >= 0 && mouseY <= height;
 }
 
-// ブラシ（fill モード）: 中心(x,y)・半径 brushSize/2 の円内にあるセル中心にタイルを置く
+// スタンプ（円）の内側にあるセル中心を brushPts に足す
 // セル中心は step/2 + k*step（generateFillPoints と同じ格子）
-function paintBrush(x, y) {
-  const step = params.gridStep;
-  const r = params.brushSize / 2;
+function addStampCells(stamp, step) {
+  const { x, y, r } = stamp;
   const kx0 = Math.ceil((x - r - step / 2) / step);
   const kx1 = Math.floor((x + r - step / 2) / step);
   const ky0 = Math.ceil((y - r - step / 2) / step);
@@ -39,17 +70,33 @@ function paintBrush(x, y) {
       const cx = step / 2 + kx * step, cy = step / 2 + ky * step;
       if (cx < 0 || cx > width || cy < 0 || cy > height) continue;
       if (Math.hypot(cx - x, cy - y) > r) continue;
-      const key = `${step}:${kx},${ky}`; // 同じセルに重複して置かない
+      const key = kx + ',' + ky; // 同じセルに重複して置かない
       if (brushCells.has(key)) continue;
       brushCells.add(key);
-      trailPoints.push({ x: cx, y: cy, cell: step }); // cell: ブラシで塗ったセルの幅
+      brushPts.push({ x: cx, y: cy });
     }
   }
 }
 
+// 全スタンプから、現在の Cell Size でセルを作り直す
+function rebuildBrushCells() {
+  const step = params.trailGridStep;
+  brushPts = [];
+  brushCells = new Set();
+  brushBuiltStep = step;
+  for (const stamp of brushStamps) addStampCells(stamp, step);
+}
+
+function paintBrush(x, y) {
+  const stamp = { x, y, r: params.brushSize / 2 };
+  brushStamps.push(stamp);
+  if (brushBuiltStep !== params.trailGridStep) rebuildBrushCells();
+  else addStampCells(stamp, params.trailGridStep);
+}
+
 // 前回位置から現在位置まで、取りこぼしがないよう細かく補間してブラシを当てる
 function paintBrushTo(x, y) {
-  const spacing = Math.max(1, Math.min(params.gridStep, params.brushSize / 2) / 2);
+  const spacing = Math.max(1, params.brushSize / 8); // 半径の 1/4 ごと
   const dx = x - lastTrailPt.x, dy = y - lastTrailPt.y;
   const n = Math.max(1, Math.ceil(Math.hypot(dx, dy) / spacing));
   for (let i = 1; i <= n; i++) paintBrush(lastTrailPt.x + dx * i / n, lastTrailPt.y + dy * i / n);
@@ -77,11 +124,13 @@ function mousePressed() {
   // GUI 上の操作では軌跡を描かない
   isDragging = insideCanvas();
   if (!isDragging) return;
+  pushHistory(); // このストロークを Undo で取り消せるようにする
   lastTrailPt = { x: mouseX, y: mouseY };
   if (params.trailMode === 'fill') {
     paintBrush(mouseX, mouseY);
   } else {
-    trailPoints.push(lastTrailPt);
+    trailStrokes.push([{ x: mouseX, y: mouseY }]);
+    trailDirty = true;
   }
 }
 
@@ -91,19 +140,25 @@ function mouseDragged() {
     paintBrushTo(mouseX, mouseY);
     return;
   }
-  // 前回の位置から現在位置まで、spacing ごとにタイルを補間して置く
-  const spacing = Math.max(1, params.trailSpacing);
-  let dx = mouseX - lastTrailPt.x;
-  let dy = mouseY - lastTrailPt.y;
-  let dist = Math.hypot(dx, dy);
-  while (dist >= spacing) {
-    const k = spacing / dist;
-    lastTrailPt = { x: lastTrailPt.x + dx * k, y: lastTrailPt.y + dy * k };
-    trailPoints.push(lastTrailPt);
-    dx = mouseX - lastTrailPt.x;
-    dy = mouseY - lastTrailPt.y;
-    dist = Math.hypot(dx, dy);
+  // マウス位置を記録するだけ。タイルは Spacing に応じて描画時に打つので、後から Spacing を変えられる
+  const stroke = trailStrokes[trailStrokes.length - 1];
+  const last = stroke[stroke.length - 1];
+  if (Math.hypot(mouseX - last.x, mouseY - last.y) >= 1) {
+    stroke.push({ x: mouseX, y: mouseY });
+    trailDirty = true;
   }
+}
+
+// 全ストロークを現在の Spacing で打ち直す
+function rebuildTrail() {
+  const spacing = Math.max(1, params.trailSpacing);
+  trailPts = [];
+  for (const stroke of trailStrokes) {
+    if (stroke.length === 1) trailPts.push(stroke[0]); // クリックだけの点
+    else resampleRing(stroke.map(p => [p.x, p.y]), spacing, trailPts); // resampleRing は [x, y] 形式
+  }
+  trailBuiltSpacing = params.trailSpacing;
+  trailDirty = false;
 }
 
 function mouseReleased() {
@@ -116,16 +171,24 @@ const GENERIC_FAMILIES = ['serif', 'sans-serif', 'monospace', 'cursive', 'fantas
 
 // === 描画するテキストとサイズ（GUI の Text / Font Size） ===
 
+// Text / SVG それぞれの配置設定（Mode・Cell Size・Pix per Cell・Count は別々）
+function shapeParams(src) {
+  return src === 'svg'
+    ? { mode: params.svgMode, gridStep: params.svgGridStep, pix: params.svgPixPerCell, count: params.svgCount }
+    : { mode: params.mode, gridStep: params.gridStep, pix: params.pixPerCell, count: params.count };
+}
+
 // 現在のパラメータから点の生成条件を表すキーを作る
 function makePointsKey() {
-  const modeKey = params.mode === 'fill' ? `fill:${params.gridStep}` : `outline:${params.count}`;
-  const srcKey = params.source === 'svg'
-    ? `svg:${svgVersion}:${params.svgScale}`
-    : `text:${params.fontName}:${params.fontSize}:${params.text}`;
-  return `${modeKey}:${srcKey}`;
+  // 表示中のものだけがキーに入る（Text と SVG は独立に表示/非表示でき、Mode などの設定も別々）
+  const modeKey = (c) => c.mode === 'fill' ? `fill:${c.gridStep}` : `outline:${c.count}`;
+  const textKey = params.showText ? `text:${modeKey(shapeParams('text'))}:${params.fontName}:${params.fontSize}:${params.text}` : 'text:off';
+  const svgKey = svgIsShown() ? `svg:${modeKey(shapeParams('svg'))}:${svgVersion}:${params.svgScale}` : 'svg:off';
+  return `${textKey}:${svgKey}`;
 }
 
 // === SVG 読み込み ===
+const svgIsShown = () => params.showSvg && svgShapes.length > 0;
 // Outline: SVG のパス上を getPointAtLength でたどって点を取る（線の太さに関係なくパスそのもの）。
 // Fill: 全図形を黒で塗りつぶした SVG 画像をキャンバスに描き、塗りつぶしをスキャンする。
 let svgFillImage = null;  // 塗りつぶし用に描き直した画像
@@ -218,7 +281,7 @@ function svgFit() {
 // Outline: 全パスを Count に応じた間隔でたどり、キャンバス座標の点にする
 function generateSvgOutlinePoints() {
   const { k, ox, oy } = svgFit();
-  const step = 100 / params.count / k; // キャンバス上の間隔を SVG 単位に直す
+  const step = 100 / shapeParams('svg').count / k; // キャンバス上の間隔を SVG 単位に直す
   const pts = [];
   for (const { el, m, ranges } of svgShapes) {
     for (const [from, to] of ranges) {
@@ -234,13 +297,13 @@ function generateSvgOutlinePoints() {
 }
 
 // 点の元になる「描かれた範囲」を 0〜255 のカバレッジとして返す（width × height、1ピクセル1要素）
-function getCoverage() {
+function getCoverage(src) {
   const g = createGraphics(width, height);
   g.pixelDensity(1);
   const ctx = g.drawingContext;
   const cov = new Uint8Array(width * height);
 
-  if (params.source === 'svg') {
+  if (src === 'svg') {
     // 透明な背景に塗りつぶした SVG を描き、アルファ値を使う
     if (svgFillImage) {
       const { k, ox, oy } = svgFit();
@@ -269,9 +332,9 @@ function getCoverage() {
 }
 
 // 塗りつぶしをスキャンして、グリッド状の点を作る
-function generateFillPoints() {
-  const step = params.gridStep;
-  const cov = getCoverage();
+function generateFillPoints(src) {
+  const step = shapeParams(src).gridStep;
+  const cov = getCoverage(src);
 
   const pts = [];
   for (let y = step / 2; y < height; y += step) {
@@ -283,7 +346,7 @@ function generateFillPoints() {
   return pts;
 }
 
-// 閉じた輪郭 ring に沿って spacing ごとに点を打つ
+// 折れ線 ring（輪郭やマウスの軌跡）に沿って spacing ごとに点を打つ
 function resampleRing(ring, spacing, out) {
   let pos = 0; // 現在の線分上で、次に点を打つ位置
   for (let i = 1; i < ring.length; i++) {
@@ -299,12 +362,12 @@ function resampleRing(ring, spacing, out) {
 }
 
 // ラスターから輪郭（等値線 0.5）を取り、Count に応じた間隔で点を打つ
-function generateOutlinePointsFromRaster() {
-  const cov = getCoverage();
+function generateOutlinePointsFromRaster(src) {
+  const cov = getCoverage(src);
   const values = new Float32Array(cov.length);
   for (let i = 0; i < values.length; i++) values[i] = cov[i] / 255;
 
-  const spacing = 100 / params.count; // textToPoints の sampleFactor (= count/100) 相当
+  const spacing = 100 / shapeParams(src).count; // textToPoints の sampleFactor (= count/100) 相当
   const pts = [];
   const multiPolygon = d3.contours().size([width, height]).thresholds([0.5])(values)[0];
   if (!multiPolygon) return pts; // 何も描かれていない場合
@@ -318,17 +381,19 @@ function generateOutlinePointsFromRaster() {
 function generatePoints() {
   pointsKey = makePointsKey();
 
-  if (params.mode === 'fill') {
-    fontPoints = generateFillPoints();
-  } else if (params.source === 'svg') {
-    fontPoints = generateSvgOutlinePoints();
-  } else {
-    fontPoints = generateOutlinePointsFromRaster();
-  }
+  // Text と SVG は独立に表示でき、両方が ON なら両方の点を置く
+  const generate = (src) => {
+    if (shapeParams(src).mode === 'fill') return generateFillPoints(src);
+    return src === 'svg' ? generateSvgOutlinePoints() : generateOutlinePointsFromRaster('text');
+  };
+  fontPoints = [];
+  if (params.showText) fontPoints = fontPoints.concat(generate('text').map(p => ({ ...p, src: 'text' })));
+  if (svgIsShown()) fontPoints = fontPoints.concat(generate('svg').map(p => ({ ...p, src: 'svg' })));
 
   // movingPoints を再構築
   movingPoints = fontPoints.map(p => ({
-    origin: createVector(p.x, p.y)        // 元の位置
+    origin: createVector(p.x, p.y),       // 元の位置
+    src: p.src                            // 'text' | 'svg'（設定の参照先）
   }));
 }
 
@@ -345,7 +410,7 @@ function setup() {
 // 中心(0,0)に w×h のタイルを描く。t=0 で四角、t=1 で楕円。
 // 角を楕円弧にして、各辺方向に半径 (w/2*t, h/2*t) を使うので、
 // t=1 のときは縦横比に関わらず正しい楕円になる
-function drawTile(w, h, t) {
+function drawPix(w, h, t) {
   const hw = w / 2, hh = h / 2;
   const rx = hw * t, ry = hh * t;
   const ix = hw - rx, iy = hh - ry; // 角の円弧の中心位置
@@ -360,53 +425,72 @@ function drawTile(w, h, t) {
 }
 
 // セル中心 (x, y) にタイルを置く。cellWidth > 0（Fill）なら、セルの幅を等分して
-// Tiles per Cell 個のタイルを横並びに置く
-function pushCellTiles(tiles, x, y, cellWidth) {
-  const n = cellWidth > 0 ? params.tilesPerCell : 1;
+// Pix per Cell 個のタイルを横並びに置く
+function pushCellPix(pix, x, y, cellWidth, pixPerCell) {
+  const n = cellWidth > 0 ? pixPerCell : 1;
   for (let j = 0; j < n; j++) {
-    tiles.push({ x: x + ((j + 0.5) / n - 0.5) * cellWidth, y });
+    pix.push({ x: x + ((j + 0.5) / n - 0.5) * cellWidth, y });
   }
 }
 
 // 描画するタイルの中心位置を全て計算する（輪郭/塗りつぶし + ドラッグの軌跡）
-function computeTiles() {
+function computePix() {
   const jitter = params.jitter;
-  const densityScale = params.densityScale / 100;
-  const densityContrast = params.densityContrast / 100;
-  const tiles = [];
+  const thinOut = params.thinOut / 100; // 間引く割合 0〜1
+  const pix = [];
 
   // シードを再セット（疎密・ジッターの再現性のため）
   randomSeed(params.seed);
   noiseSeed(params.seed);
 
-  // 文字のタイルは Text が ON のときだけ置く（初期は真っ白なキャンバス）
-  for (let i = 0; params.showText && i < movingPoints.length; i++) {
+  // 文字・SVG のタイルは、それぞれの Show が ON のときだけ点がある（初期は真っ白なキャンバス）
+  for (let i = 0; i < movingPoints.length; i++) {
     const pt = movingPoints[i];
 
-    // 疎密判定（疎密フィルタはここだけ）
-    const t = i / movingPoints.length;
-    const noiseVal = noise(t * densityScale * 20);
-    const threshold = densityContrast * (1 - noiseVal);
-    if (random(1) < threshold) continue;
+    // 間引き判定（全タイル共通の確率）
+    if (random(1) < thinOut) continue;
 
     // ジッター（シード固定なので毎フレーム同じ値）
     const offsetX = random(-jitter, jitter);
     const offsetY = random(-jitter, jitter);
 
-    pushCellTiles(tiles, pt.origin.x + offsetX, pt.origin.y + offsetY, params.mode === 'fill' ? params.gridStep : 0);
+    const c = shapeParams(pt.src);
+    pushCellPix(pix, pt.origin.x + offsetX, pt.origin.y + offsetY, c.mode === 'fill' ? c.gridStep : 0, c.pix);
   }
 
+  // ブラシ（Trail / Fill）で描いたタイルにも、Distribution（疎密・ジッター）を効かせる。
+  // 描き足しても既存のタイルの結果が変わらないよう、順番ではなく位置から決める
+  const hash01 = (x, y, salt) => {
+    const v = Math.sin(x * 12.9898 + y * 78.233 + params.seed * 37.719 + salt * 4.581) * 43758.5453;
+    return v - Math.floor(v);
+  };
+  const distribute = (x, y) => {
+    // 間引き: 位置から決まる乱数が thinOut 未満なら消す
+    if (hash01(x, y, 1) < thinOut) return null;
+    return { x: x + (hash01(x, y, 2) * 2 - 1) * jitter, y: y + (hash01(x, y, 3) * 2 - 1) * jitter };
+  };
+
   // マウスドラッグの軌跡にも同じタイルを置く
-  for (const tp of trailPoints) pushCellTiles(tiles, tp.x, tp.y, tp.cell || 0);
-  return tiles;
+  if (trailDirty || trailBuiltSpacing !== params.trailSpacing) rebuildTrail();
+  for (const tp of trailPts) {
+    const d = distribute(tp.x, tp.y);
+    if (d) pushCellPix(pix, d.x, d.y, 0, 1);
+  }
+  // Fill ブラシのセル。Cell Size が変わっていたら作り直す
+  if (brushBuiltStep !== params.trailGridStep) rebuildBrushCells();
+  for (const bp of brushPts) {
+    const d = distribute(bp.x, bp.y);
+    if (d) pushCellPix(pix, d.x, d.y, params.trailGridStep, params.trailPixPerCell);
+  }
+  return pix;
 }
 
 function draw() {
   // GUI（Tweakpane）のパラメータを取得
   const d = params.circleSize;
-  const tileAngle = radians(params.tileAngle);
-  const tileW = d * params.tileAspect;
-  const tileRound = params.tileRound / 100;
+  const pixAngle = radians(params.pixAngle);
+  const pixW = d * params.pixAspect;
+  const pixRound = params.pixRound / 100;
 
   // 点の生成条件が変わったら再生成
   if (makePointsKey() !== pointsKey) {
@@ -421,11 +505,11 @@ function draw() {
   fill(255);
   noStroke();
 
-  for (const tile of computeTiles()) {
+  for (const pix of computePix()) {
     push();
-    translate(tile.x, tile.y);
-    rotate(tileAngle);
-    drawTile(tileW, d, tileRound);
+    translate(pix.x, pix.y);
+    rotate(pixAngle);
+    drawPix(pixW, d, pixRound);
     pop();
   }
   blendMode(BLEND);
@@ -435,7 +519,7 @@ function draw() {
 // === SVG 書き出し ===
 // 白背景に白タイルを DIFFERENCE で重ねる見た目は、奇数回重なった所だけ黒になる（XOR）。
 // 全タイルを1つのパスにまとめて fill-rule="evenodd" にすると、同じ結果をベクターで再現できる。
-function tilePathData(cx, cy, w, h, t, angleDeg) {
+function pixPathData(cx, cy, w, h, t, angleDeg) {
   const a = radians(angleDeg), cos = Math.cos(a), sin = Math.sin(a);
   const hw = w / 2, hh = h / 2;
   const rx = hw * t, ry = hh * t;
@@ -451,9 +535,9 @@ function tilePathData(cx, cy, w, h, t, angleDeg) {
 
 function exportSVG() {
   const d = params.circleSize;
-  const w = d * params.tileAspect;
-  const t = params.tileRound / 100;
-  const paths = computeTiles().map(tl => tilePathData(tl.x, tl.y, w, d, t, params.tileAngle)).join('');
+  const w = d * params.pixAspect;
+  const t = params.pixRound / 100;
+  const paths = computePix().map(tl => pixPathData(tl.x, tl.y, w, d, t, params.pixAngle)).join('');
   const svg = `<?xml version="1.0" encoding="UTF-8"?>\n`
     + `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">\n`
     + `<rect width="${width}" height="${height}" fill="#fff"/>\n`
@@ -461,7 +545,7 @@ function exportSVG() {
   const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
   const link = document.createElement('a');
   link.href = url;
-  link.download = 'difference-ellipses.svg';
+  link.download = 'exclude-overlap.svg';
   link.click();
   URL.revokeObjectURL(url);
 }
